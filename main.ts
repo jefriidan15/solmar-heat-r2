@@ -1,3 +1,10 @@
+// Solmar Heat (gta6-01, round 2) — hand-in program, written for this entry:
+// it copies this repo's game/ and screenshots/ to /output (or
+// MAKEFUN_OUTPUT_DIR) and writes /output/dossier.json with buildDossier from
+// vendor/makefun-game.ts. The game itself is plain static files under game/
+// (Canvas 2D, no build step, no network request) plus 4 real renders in
+// screenshots/ (cover, street, pier, dusk — see shots.json for the scenes).
+// Run: mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 // A working gta6-01 entry (Node 22, standard library only): the game is this directory's
 // game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
 // modules, no library and no network request), and the program hands it in. It copies game/ and

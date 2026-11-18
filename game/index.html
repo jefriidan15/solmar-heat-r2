@@ -1,19 +1,106 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<link rel="icon" href="data:,">
+<title>Solmar Heat — an open-world crime game</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
-  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0d1117; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    color: #f2f2f2;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #wrap { position: relative; width: 1280px; height: 720px; max-width: 100vw; max-height: 100vh; }
+  canvas#game { width: 100%; height: 100%; display: block; background: #7ec8e3; }
+  #mini {
+    position: absolute; left: 14px; bottom: 14px;
+    width: 190px; height: 142px;
+    border: 2px solid rgba(255,255,255,0.65); border-radius: 6px;
+    background: #222; z-index: 5;
+  }
+  .overlay {
+    position: absolute; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: linear-gradient(160deg, rgba(20,10,30,0.88), rgba(180,60,20,0.72));
+    text-align: center; padding: 24px;
+  }
+  .hidden { display: none !important; }
+  h1 {
+    font-size: 64px; letter-spacing: 4px; color: #ffd23d;
+    text-shadow: 0 4px 0 #b5543a, 0 8px 24px rgba(0,0,0,0.6);
+    margin-bottom: 6px;
+  }
+  .tag { font-size: 17px; color: #ffe9a8; margin-bottom: 22px; max-width: 640px; line-height: 1.5; }
+  .btn {
+    display: inline-block; margin: 6px; padding: 13px 34px;
+    font-size: 18px; font-weight: 700; color: #1a1a1a;
+    background: #ffd23d; border: none; border-radius: 8px; cursor: pointer;
+  }
+  .btn:hover { background: #ffe27a; }
+  .btn.ghost { background: transparent; color: #fff; border: 2px solid #fff; }
+  .btn.ghost:hover { background: rgba(255,255,255,0.15); }
+  .controls {
+    margin-top: 20px; font-size: 14px; line-height: 1.9; color: #e8e8e8;
+    background: rgba(0,0,0,0.45); border-radius: 10px; padding: 12px 22px;
+  }
+  .controls b { color: #ffd23d; }
+  #menu-note { margin-top: 10px; font-size: 14px; color: #7dff8a; }
+  #brief {
+    position: absolute; left: 50%; top: 64px; transform: translateX(-50%);
+    z-index: 6; max-width: 760px; padding: 10px 18px;
+    background: rgba(0,0,0,0.72); border-left: 4px solid #ffd23d; border-radius: 6px;
+    font-size: 15px; line-height: 1.45; color: #fff;
+  }
+  #pause { background: rgba(0,0,0,0.72); }
+  #pause h2 { font-size: 44px; color: #ffd23d; margin-bottom: 8px; }
+  #pause p { color: #ddd; margin-bottom: 18px; }
+  #credit {
+    position: absolute; right: 12px; bottom: 10px; z-index: 5;
+    font-size: 11px; color: rgba(255,255,255,0.75);
+  }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
-<script type="module" src="./src/main.js"></script>
+<div id="wrap">
+  <canvas id="game" width="1280" height="720"></canvas>
+  <canvas id="mini" width="190" height="142"></canvas>
+  <div id="brief" class="hidden"></div>
+
+  <div id="menu" class="overlay">
+    <h1>SOLMAR HEAT</h1>
+    <p class="tag">A sun-soaked coastal city. One newcomer driver, Dana, five jobs for
+    Rosa's garage, the Vipers on the pier, and the Solmar police on every corner.
+    Steal a car. Lose the heat. Get paid.</p>
+    <div>
+      <button id="new-btn" class="btn">New Game</button>
+      <button id="continue-btn" class="btn ghost hidden">Continue</button>
+    </div>
+    <p id="menu-note"></p>
+    <div class="controls">
+      <b>WASD</b> walk / drive &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>E</b> steal / enter / exit car<br>
+      <b>Mouse</b> aim &nbsp;·&nbsp; <b>Click</b> shoot pistol &nbsp;·&nbsp; <b>Space</b> handbrake<br>
+      <b>P</b> pause &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>Enter</b> continue after Busted / Wasted
+    </div>
+  </div>
+
+  <div id="pause" class="overlay hidden">
+    <h2>PAUSED</h2>
+    <p>Solmar waits for no one — except right now.</p>
+    <div>
+      <button id="resume-btn" class="btn">Resume</button>
+      <button id="restart-btn" class="btn ghost">Restart</button>
+    </div>
+    <div class="controls">
+      <b>WASD</b> walk / drive &nbsp;·&nbsp; <b>E</b> car &nbsp;·&nbsp; <b>Click</b> shoot &nbsp;·&nbsp; <b>Space</b> handbrake
+    </div>
+  </div>
+
+  <div id="credit">Solmar Heat — an original game. No real city, no real gang, no borrowed art.</div>
+</div>
+<script type="module" src="./src/game.js"></script>
 </body>
 </html>
