@@ -1,81 +1,54 @@
 # Solmar Heat
 
-[![make.fun](https://make.fun/badge/competition/gta6-01)](https://make.fun/competitions/gta6-01)
-[![make.fun](https://make.fun/badge/entry/jefriidan15/solmar-heat-r2)](https://make.fun/entries/jefriidan15/solmar-heat-r2)
-[![make.fun](https://make.fun/badge/build/jefriidan15/solmar-heat-r2)](https://make.fun/entries/jefriidan15/solmar-heat-r2)
+[![gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
+[![rank](https://make.fun/badge/gta6-01/jefriidan15/solmar-heat-r2/rank.svg)](https://make.fun/bounty/gta6-01)
+[![reward](https://make.fun/badge/gta6-01/jefriidan15/solmar-heat-r2/reward.svg)](https://make.fun/bounty/gta6-01)
 
-An original open-world crime game set in **Solmar**, a fictional sun-soaked
-coastal city. You are **Dana**, a newcomer driver proving herself to **Rosa**,
-a garage owner, while the **Vipers** crew and the Solmar police make every job
-harder than the last. Nothing here comes from any commercial game: the city,
-characters, story, art and music are all invented for this entry.
+**Solmar Heat** is an original top-down open-world crime game for the
+[make.fun GTA 6 bounty](https://make.fun/bounty/gta6-01), built from scratch
+in plain Canvas 2D with zero dependencies and zero network requests.
 
-## How to play
+Dana is new in Solmar City and already broke. Rosa at the garage has five
+jobs that pay — if the Solmar PD doesn't catch her first.
 
-Serve the `game/` folder with any static server and open `game/index.html`:
+## The game
+
+- **Solmar City** — a procedural 2400×2400 island: a road grid, downtown,
+  Old Town, Harbor, Northside, a beach and a pier, all generated from a seed.
+- **On foot and by car** — WASD to move, Shift to run, E to steal any parked
+  car, Space for the handbrake, mouse to aim, click to shoot.
+- **Traffic and pedestrians** — cars drive the grid, pedestrians walk the
+  sidewalks and flee from gunfire and speeding cars.
+- **Wanted level 0–5** — stealing and shooting draw heat; police interceptors
+  chase and ram, officers on foot run you down. Get caught and you're Busted;
+  get shot down and you're Wasted.
+- **Five missions from Rosa** — First Wheels, Sunset Courier (90s), Pier
+  Showdown (4 Vipers at the docks), Heat Run (draw 3 stars, shake them off),
+  Night Run — plus courier side work that pays on the side.
+- **HUD with a live minimap** — cash, health, stars, ammo, speed, objective,
+  and a minimap tracking the player, police, and the job marker.
+- **Sound, save, menus** — synthesized WebAudio (engine, sirens, gunshots,
+  jingles), M to mute, P to pause, progress saved to localStorage with
+  Continue on the start menu.
+
+## Play it
 
 ```sh
 node serve.ts
-# then open http://localhost:8080
+# open http://localhost:8080
 ```
 
-Click **New Game** (or **Continue** if a save exists). Follow the objective
-line at the top of the screen and the yellow marker on the map and minimap.
+## Screenshots
 
-## The story — five jobs
+`1-cover.jpg` — downtown chase at 3 stars · `2-street.jpg` — on foot at the
+plaza · `3-pier.jpg` — the Vipers at the docks · `4-dusk.jpg` — sunset beach
+drive. All four are real renders of the game (`?shot=cover|street|pier|dusk&seed=1`).
 
-1. **First Wheels** — steal any car and deliver it to Rosa's Garage. Get paid.
-2. **Sunset Courier** — a package across town in 90 seconds, before sunset.
-3. **Pier Showdown** — clear the Vipers off Solmar Pier. Pistol loaded.
-4. **Heat Run** — you start at 3 stars. Lose the cops, then slip to the safehouse.
-5. **Night Run** — one last hot car to the East Docks, after dark.
+## Build
 
-Between jobs, green **$** courier pickups appear around the city for +$150 each.
-
-## Controls
-
-| Key | Action |
-| --- | --- |
-| WASD / arrows | Walk (on foot) / drive (in a car) |
-| Shift | Run |
-| E | Steal / enter a parked car, exit a car |
-| Mouse | Aim |
-| Click | Shoot the pistol |
-| Space | Handbrake |
-| P | Pause |
-| M | Mute |
-| Enter | Continue after Busted / Wasted |
-
-## Systems
-
-- **City** — downtown street grid, beach and pier on the south edge, suburbs,
-  a highway ring, traffic cars on the roads and pedestrians on the sidewalks.
-- **Wanted level 0–5** — stealing, shooting and hitting people or police raise
-  it. Police cruisers and officers chase; the heat fades when you stay clean
-  and out of sight. Caught on foot at high wanted and you are **Busted**;
-  at 0 health you are **Wasted**.
-- **Combat** — pistol with 24 rounds, mouse aim, Vipers and cops shoot back.
-- **HUD** — cash, health, wanted stars, ammo, speed while driving, live
-  minimap with streets, player arrow, mission marker and police, objective line.
-- **Save / Continue** — progress autosaves to localStorage; the start screen
-  offers Continue when a save exists.
-- **Sound** — fully synthesized WebAudio: engine hum, sirens, gunshots and a
-  bass groove. No audio files.
-- **Tech** — plain Canvas 2D, zero dependencies, zero network requests. Static
-  files under `game/` only.
-
-## Files
-
-- `game/index.html` — page shell, menu and pause overlays
-- `game/src/game.js` — core loop, player, wanted level, police, save flow
-- `game/src/world.js` — city layout, buildings, collision
-- `game/src/vehicles.js` — parked cars, traffic, police cruisers, driving
-- `game/src/people.js` — pedestrians, cops, Vipers, shooting
-- `game/src/missions.js` — the five jobs and courier side work
-- `game/src/render.js` — Canvas 2D world, HUD and minimap
-- `game/src/audio.js` — synthesized WebAudio sound
-- `game/src/input.js` — keyboard + mouse
-- `game/src/rng.js` — seeded random numbers
-- `game/src/save.js` — localStorage save / load
-
-Deterministic screenshot scenes: `?shot=cover|street|pier|dusk&seed=1`.
+`game/` is plain static files: `index.html` plus ES modules in `game/src/`
+(`game.js` core, `city.js` world, `vehicles.js` traffic/police/driving,
+`people.js` peds/cops/Vipers, `missions.js` jobs, `render.js` world/HUD/minimap,
+`audio.js` synthesized sound, `input.js`, `rng.js`, `save.js`, `shots.js`).
+`main.ts` copies `game/` and `screenshots/` to `/output` and writes
+`/output/dossier.json` with the vendored `vendor/makefun-game.ts`.

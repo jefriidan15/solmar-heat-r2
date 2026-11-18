@@ -1,492 +1,466 @@
-// Solmar Heat — core game: player, driving, combat, wanted level, police,
-// missions, courier side jobs, save/continue, and the screenshot hooks.
-// Dana, a newcomer driver, proves herself to Rosa, a garage owner, while
-// the Vipers and the Solmar police make her life difficult.
-import { makeRng, clamp, angleTo, dist2 } from './rng.js';
-import { buildWorld, collideBuildings, WORLD_W, WORLD_H, STREET } from './world.js';
-import { makeInput } from './input.js';
-import { makeAudio } from './audio.js';
-import { makeRenderer } from './render.js';
+// game.js — Solmar Heat core: boot, state, the main loop, on-foot
+// movement, stealing and shooting, wanted heat, busted/wasted, and the
+// menu wiring. Systems live in their own modules; this file only runs
+// them in the right order.
+import { buildCity, SPAWN, GARAGE, WORLD, resolveCircle } from './city.js';
+import { makeRng, clamp, dist, angleTo } from './rng.js';
+import { SoundBank } from './audio.js';
+import { Input } from './input.js';
 import {
-  spawnParked, spawnTraffic, updateTraffic, updatePlayerCar,
-  updatePoliceCar, spawnPoliceCar, makeCar,
+  spawnParkedCars, spawnTraffic, updateTraffic, spawnPoliceCar,
+  updatePoliceCars, updateDriving,
 } from './vehicles.js';
 import {
-  spawnPedestrians, spawnVipers, spawnCop, updatePedestrians,
-  updateEnemies, rayHit,
+  spawnPeds, updatePeds, updateCops, spawnVipers, spawnOfficer,
+  updateVipers, fireBullet, updateBullets,
 } from './people.js';
 import {
-  MISSIONS, makeMissionState, missionMarker, missionObjectiveText,
-  startMission, updateMission, advanceMission, retryMission,
+  freshMissionState, startMission, updateMission, updateSideJob,
 } from './missions.js';
-import { saveGame, loadGame, hasSave, clearSave } from './save.js';
+import { render } from './render.js';
+import { hasSave, writeSave, readSave, clearSave } from './save.js';
+import { setupShot } from './shots.js';
 
-const canvas = document.getElementById('game');
-const mini = document.getElementById('mini');
-const menuEl = document.getElementById('menu');
-const pauseEl = document.getElementById('pause');
-const briefEl = document.getElementById('brief');
-const continueBtn = document.getElementById('continue-btn');
-const newBtn = document.getElementById('new-btn');
-const resumeBtn = document.getElementById('resume-btn');
-const restartBtn = document.getElementById('restart-btn');
-const menuNote = document.getElementById('menu-note');
+const WALK_SPEED = 165;
+const RUN_SPEED = 265;
+const FIRE_INTERVAL = 0.18;
 
-const params = new URLSearchParams(location.search);
-const seed = Number(params.get('seed') || 20261118);
-const shot = params.get('shot') || null;
-
-const rng = makeRng(seed);
-const world = buildWorld(seed);
-const input = makeInput(canvas);
-const audio = makeAudio();
-const renderer = makeRenderer(canvas, mini);
-
-const state = {
-  mode: 'menu', // menu | playing | paused | busted | wasted
-  px: world.places.garage.x, py: world.places.garage.y + 130,
-  aim: -Math.PI / 2, pSpeed: 0,
-  vx: 0, vy: 0, dt: 0.016,
-  health: 100, cash: 0, ammo: 24,
-  wanted: 0, cleanTime: 0, crimeCd: 0,
-  inCar: false, playerCar: null, speedKmh: 0,
-  parked: [], traffic: [], policeCars: [], peds: [], enemies: [],
-  effects: [], bullets: [],
-  missions: makeMissionState(),
-  night: false, dusk: false,
-  toast: '', toastT: 0,
-  bustT: 0, shootCd: 0, interactCd: 0,
-  vipersSpawned: false,
-  fps: 0, frames: 0, fpsT: 0,
-  errors: [],
-};
-
-window.addEventListener('error', (e) => state.errors.push(String(e.message || e.error)));
-
-function toast(msg, secs) {
-  state.toast = msg; state.toastT = secs || 3;
-}
-
-function setWanted(n) {
-  state.wanted = clamp(Math.round(n), 0, 5);
-  state.cleanTime = 0;
-  audio.setSiren(state.wanted >= 2);
-}
-
-function addWanted(n) {
-  if (state.wanted < 5) setWanted(state.wanted + n);
-  state.crimeCd = 2;
-}
-
-function newGame(fromSave) {
-  const s = fromSave ? loadGame() : null;
-  state.parked = spawnParked(rng, world, 14);
-  state.traffic = spawnTraffic(rng, 10);
-  state.peds = spawnPedestrians(rng, world, 16);
-  state.policeCars = [];
-  state.enemies = [];
-  state.effects = [];
-  state.missions = makeMissionState();
-  state.night = false; state.dusk = false;
-  state.vipersSpawned = false;
-  state.bustT = 0;
-  if (s) {
-    state.cash = s.cash; state.health = s.health; state.ammo = s.ammo;
-    state.px = s.px; state.py = s.py;
-    state.missions.index = Math.min(s.missionIndex, MISSIONS.length - 1);
-    state.missions.done = !!s.done;
-  } else {
-    state.cash = 0; state.health = 100; state.ammo = 24;
-    state.px = world.places.garage.x; state.py = world.places.garage.y + 130;
-  }
-  state.wanted = 0;
-  state.inCar = false; state.playerCar = null;
-  startMission(state.missions, gameApi);
-  state.mode = 'playing';
-  menuEl.classList.add('hidden');
-  pauseEl.classList.add('hidden');
-  const cur = MISSIONS[state.missions.index];
-  showBrief(cur ? cur.brief : 'Free roam, Dana.');
-  toast(cur ? `Job ${cur.id}/5: ${cur.name}` : 'Free roam', 3);
-  audio.unlock();
-}
-
-function showBrief(text) {
-  briefEl.textContent = text;
-  briefEl.classList.remove('hidden');
-  setTimeout(() => briefEl.classList.add('hidden'), 7000);
-}
-
-function endRun(kind) {
-  state.mode = kind; // 'busted' | 'wasted'
-  state.wanted = 0;
-  audio.setSiren(false);
-  if (kind === 'busted') state.cash = Math.max(0, state.cash - 100);
-  saveGame(state);
-}
-
-function respawn() {
-  state.health = 100;
-  state.px = world.places.garage.x;
-  state.py = world.places.garage.y + 130;
-  state.inCar = false;
-  if (state.playerCar) { state.playerCar.parked = true; state.parked.push(state.playerCar); state.playerCar = null; }
-  state.policeCars = [];
-  state.enemies = [];
-  state.vipersSpawned = false;
-  state.bustT = 0;
-  state.mode = 'playing';
-  // Restart the current job fresh so a failed fight is retryable.
-  retryMission(state.missions, gameApi);
-  const cur = MISSIONS[state.missions.index];
-  if (cur) showBrief(cur.brief);
-}
-
-// ---- mission hooks used by missions.js ----
-const gameApi = {
-  spawnVipersAtPier() {
-    const p = world.places.pier;
-    state.enemies = spawnVipers(rng, p.x, p.y - 40, 4);
-    state.vipersSpawned = true;
-  },
-  vipersAlive() {
-    return state.enemies.filter((e) => e.kind === 'viper' && !e.dead).length;
-  },
-  forceWanted(n) { setWanted(n); },
-  setNight(on) { state.night = on; state.dusk = false; },
-};
-
-function payMission() {
-  const cur = MISSIONS[state.missions.index];
-  state.cash += cur.pay;
-  audio.cash();
-  toast(`Job complete! +$${cur.pay} — ${cur.name}`, 4);
-  saveGame(state);
-  advanceMission(state.missions, gameApi);
-  const next = MISSIONS[state.missions.index];
-  if (next) showBrief(next.brief);
-  else toast('All jobs done — Solmar is yours!', 6);
-}
-
-function failMission() {
-  toast('Job failed — Rosa is giving you another shot.', 4);
-  retryMission(state.missions, gameApi);
-  const cur = MISSIONS[state.missions.index];
-  if (cur) showBrief(cur.brief);
-}
-
-// ---- combat ----
-function shoot() {
-  if (state.ammo <= 0) { audio.blip(180); toast('Out of ammo — find Rosa, she reloads you.', 2); return; }
-  state.ammo--;
-  state.shootCd = 0.25;
-  audio.shot();
-  const sx = state.px + Math.cos(state.aim) * 22;
-  const sy = state.py + Math.sin(state.aim) * 22;
-  state.effects.push({ kind: 'muzzle', x: sx, y: sy, life: 1 });
-  const targets = [...state.enemies, ...state.peds];
-  const hit = rayHit(sx, sy, state.aim, targets, 520);
-  if (hit) {
-    hit.health -= 34;
-    state.effects.push({ kind: 'blood', x: hit.x, y: hit.y, life: 1 });
-    if (hit.health <= 0) {
-      hit.dead = true;
-      if (hit.kind === 'ped') addWanted(1);
-      if (hit.kind === 'cop') addWanted(2);
-    }
-  }
-  addWanted(0); // shooting is a crime even on a miss
-  state.wanted = Math.max(state.wanted, 1);
-  state.cleanTime = 0;
-}
-
-function enemyShoot(e, d) {
-  audio.shot();
-  state.effects.push({ kind: 'muzzle', x: e.x + Math.cos(e.angle) * 20, y: e.y + Math.sin(e.angle) * 20, life: 1 });
-  // Hit chance falls with distance; Dana takes 6-12 damage per hit.
-  if (Math.random() < clamp(0.75 - d / 600, 0.15, 0.7)) {
-    state.health -= 6 + Math.random() * 6;
-    audio.thud();
-    if (state.health <= 0) endRun('wasted');
-  }
-}
-
-// ---- per-frame update ----
-function update(dt) {
-  state.dt = dt;
-  state.crimeCd = Math.max(0, state.crimeCd - dt);
-  state.shootCd = Math.max(0, state.shootCd - dt);
-  state.interactCd = Math.max(0, state.interactCd - dt);
-  if (state.toastT > 0) { state.toastT -= dt; if (state.toastT <= 0) state.toast = ''; }
-
-  // Pause / mute keys (checked even when paused, via keydown handler below).
-  const px = state.px, py = state.py;
-
-  if (state.inCar && state.playerCar) {
-    const car = state.playerCar;
-    const res = updatePlayerCar(dt, car, input, world);
-    state.speedKmh = res.speedKmh;
-    state.px = car.x; state.py = car.y;
-    state.vx = Math.cos(car.angle) * car.speed;
-    state.vy = Math.sin(car.angle) * car.speed;
-    audio.setEngine(Math.abs(car.speed) / 460, true);
-    // Run over a pedestrian at speed: a crime.
-    for (const p of state.peds) {
-      if (!p.dead && dist2(p.x, p.y, car.x, car.y) < 30 * 30 && Math.abs(car.speed) > 120) {
-        p.dead = true;
-        audio.thud();
-        addWanted(1);
-        toast('You hit a pedestrian! The heat is on.', 2.5);
-      }
-    }
-    // Exit the car.
-    if (input.down('KeyE') && state.interactCd <= 0 && Math.abs(car.speed) < 40) {
-      state.interactCd = 0.4;
-      state.inCar = false;
-      state.px = car.x + Math.cos(car.angle + Math.PI / 2) * 40;
-      state.py = car.y + Math.sin(car.angle + Math.PI / 2) * 40;
-      car.parked = true;
-      state.parked.push(car);
-      state.playerCar = null;
-      state.speedKmh = 0;
-    }
-  } else {
-    // On foot.
-    let mx = (input.down('KeyD') || input.down('ArrowRight') ? 1 : 0) - (input.down('KeyA') || input.down('ArrowLeft') ? 1 : 0);
-    let my = (input.down('KeyS') || input.down('ArrowDown') ? 1 : 0) - (input.down('KeyW') || input.down('ArrowUp') ? 1 : 0);
-    const run = input.down('ShiftLeft') || input.down('ShiftRight');
-    const spd = run ? 300 : 175;
-    const len = Math.hypot(mx, my);
-    if (len > 0) { mx /= len; my /= len; }
-    state.pSpeed = len > 0 ? spd : 0;
-    state.px += mx * spd * dt;
-    state.py += my * spd * dt;
-    state.vx = mx * spd; state.vy = my * spd;
-    const fixed = collideBuildings(world, state.px, state.py, 13);
-    state.px = clamp(fixed.x, 30, WORLD_W - 30);
-    state.py = clamp(fixed.y, 30, WORLD_H - 40);
-    // Aim at the mouse.
-    const wx = state.px + (input.mouseX - canvas.width / 2);
-    const wy = state.py + (input.mouseY - canvas.height / 2);
-    state.aim = angleTo(state.px, state.py, wx, wy);
-    audio.setEngine(0, false);
-    // Steal a parked car.
-    if (input.down('KeyE') && state.interactCd <= 0) {
-      const near = state.parked.find((c) => dist2(c.x, c.y, state.px, state.py) < 70 * 70);
-      if (near) {
-        state.interactCd = 0.4;
-        state.parked = state.parked.filter((c) => c !== near);
-        near.parked = false;
-        state.playerCar = near;
-        state.inCar = true;
-        addWanted(1);
-        audio.blip(520);
-        toast('Car stolen! +1 star. Get to the marker.', 2.5);
-      }
-    }
-    // Shoot.
-    if (input.clicked && state.shootCd <= 0) shoot();
-  }
-
-  // Traffic + pedestrians.
-  updateTraffic(dt, state.traffic, state.playerCar);
-  updatePedestrians(dt, state.peds, world, state.px, state.py);
-
-  // Wanted decay: stay clean and out of sight and the heat fades.
-  const policeNear = state.policeCars.some((c) => dist2(c.x, c.y, state.px, state.py) < 420 * 420)
-    || state.enemies.some((e) => e.kind === 'cop' && !e.dead && dist2(e.x, e.y, state.px, state.py) < 380 * 380);
-  if (state.wanted > 0 && state.crimeCd <= 0 && !policeNear) {
-    state.cleanTime += dt;
-    if (state.cleanTime > 12) { setWanted(state.wanted - 1); toast('The heat is fading…', 2); }
-  } else if (policeNear) {
-    state.cleanTime = 0;
-  }
-
-  // Police response scales with wanted level.
-  const wantCars = state.wanted >= 2 ? Math.min(state.wanted - 1, 3) : 0;
-  while (state.policeCars.length < wantCars) state.policeCars.push(spawnPoliceCar(rng, state.px, state.py));
-  while (state.policeCars.length > wantCars) state.policeCars.pop();
-  const wantCops = state.wanted >= 3 ? Math.min(state.wanted - 2, 3) : 0;
-  const cops = state.enemies.filter((e) => e.kind === 'cop' && !e.dead);
-  while (cops.length < wantCops) { const c = spawnCop(rng, state.px, state.py); state.enemies.push(c); cops.push(c); }
-  for (const c of state.policeCars) {
-    const d = updatePoliceCar(dt, c, state.px, state.py);
-    // Ram: damage on contact, worse on foot.
-    if (d < 46) {
-      if (state.inCar) { state.playerCar.speed *= 0.6; }
-      else { state.health -= 25 * dt * 4; if (state.health <= 0) endRun('wasted'); }
-    }
-  }
-  updateEnemies(dt, state.enemies, state.px, state.py, world, enemyShoot);
-
-  // Busted: a cop stays on top of Dana on foot at high wanted.
-  if (!state.inCar && state.wanted >= 3) {
-    const close = state.enemies.some((e) => e.kind === 'cop' && !e.dead && dist2(e.x, e.y, state.px, state.py) < 36 * 36);
-    if (close) {
-      state.bustT += dt;
-      if (state.bustT > 1.2) endRun('busted');
-    } else state.bustT = Math.max(0, state.bustT - dt * 2);
-  }
-
-  // Courier side pickup.
-  state.missions.courierCd -= dt;
-  if (!state.missions.courier && state.missions.courierCd <= 0 && state.missions.index >= 0) {
-    const gx = Math.floor(rng() * 8) * STREET + 46;
-    const gy = Math.floor(rng() * 5) * STREET + 46;
-    state.missions.courier = { x: gx, y: gy };
-  }
-  if (state.missions.courier && dist2(state.px, state.py, state.missions.courier.x, state.missions.courier.y) < 46 * 46) {
-    state.cash += 150;
-    audio.cash();
-    toast('Courier pickup +$150', 2.5);
-    state.missions.courier = null;
-    state.missions.courierCd = 25;
-    saveGame(state);
-  }
-
-  // Mission progress.
-  const ev = {
-    dt, px: state.px, py: state.py, inCar: state.inCar, wanted: state.wanted,
-    garage: world.places.garage, depot: world.places.courierHub,
-    safehouse: world.places.safehouse, docks: world.places.docks,
-    vipersAlive: gameApi.vipersAlive(), vipersSpawned: state.vipersSpawned,
-  };
-  const res = updateMission(state.missions, ev);
-  if (res === 'paid') payMission();
-  else if (res === 'failed') failMission();
-
-  // Effects decay.
-  for (const e of state.effects) e.life -= dt * 2.2;
-  state.effects = state.effects.filter((e) => e.life > 0);
-
-  // Autosave every ~10 s while playing.
-  state.saveT = (state.saveT || 0) + dt;
-  if (state.saveT > 10) { state.saveT = 0; saveGame(state); }
-}
-
-function renderState() {
+function createState(seed) {
+  const rng = makeRng(seed);
   return {
-    world, px: state.px, py: state.py, vx: state.vx, vy: state.vy, dt: state.dt,
-    aim: state.aim, pSpeed: state.pSpeed, inCar: state.inCar, playerCar: state.playerCar,
-    parked: state.parked, traffic: state.traffic, policeCars: state.policeCars,
-    peds: state.peds, enemies: state.enemies, effects: state.effects,
-    cash: state.cash, health: state.health, ammo: state.ammo, wanted: state.wanted,
-    speedKmh: state.speedKmh, night: state.night, dusk: state.dusk,
-    objective: missionObjectiveText(state.missions),
-    marker: missionMarker(state.missions, world, { x: state.px, y: state.py }, state.inCar),
-    courier: state.missions.courier,
-    toast: state.toast,
-    busted: state.mode === 'busted', wasted: state.mode === 'wasted',
-    allDone: state.missions.done,
+    seed,
+    rng,
+    time: 0,
+    mode: 'menu',
+    timeOfDay: 'day',
+    city: buildCity(seed),
+    player: {
+      x: SPAWN.x, y: SPAWN.y, angle: -Math.PI / 2,
+      hp: 100, ammo: 24, cash: 0,
+      heat: 0, wanted: 0, bust: 0,
+      car: null, speed: 0, walkBlocked: false,
+    },
+    cars: {
+      parked: spawnParkedCars(rng),
+      traffic: spawnTraffic(rng, 14),
+      police: [],
+    },
+    peds: spawnPeds(rng, 22),
+    cops: [],
+    vipers: [],
+    bullets: [],
+    fx: [],
+    mission: freshMissionState(),
+    side: { active: false, cooldown: 25, timer: 0, reward: 0, target: null },
+    cam: { x: 0, y: 0 },
+    banner: '',
+    bannerT: 0,
+    lastCrimeAt: -100,
+    shotsFiredAt: -100,
+    fireCd: 0,
+    policeTimer: 0,
+    saveTimer: 0,
+    autoDrive: false,
+    shot: null,
+    shotFrames: 0,
+    fps: 0,
+    stats: { kills: 0, carsStolen: 0 },
+    // Bound by game.js after construction; modules call these.
+    busted: null,
+    wasted: null,
+    saveGame: null,
+    spawnVipers: null,
   };
 }
 
-// ---- screenshot scene hooks (?shot=...) ----
-function applyShot() {
-  if (!shot) return;
-  const P = world.places;
-  if (shot === 'cover') {
-    // Downtown chase: driving a sport car, 3 stars, cruisers closing in.
-    const car = makeCar(1600, 1200, 0, { color: '#d94f3d', model: 'sport' });
-    state.playerCar = car; state.inCar = true;
-    car.speed = 320;
-    state.px = car.x; state.py = car.y;
-    setWanted(3);
-    state.policeCars = [spawnPoliceCar(rng, 1500, 1100), spawnPoliceCar(rng, 1750, 1300)];
-    state.policeCars[0].x = 1420; state.policeCars[0].y = 1180;
-    state.policeCars[1].x = 1780; state.policeCars[1].y = 1300;
-    state.dusk = false;
-  } else if (shot === 'street') {
-    state.px = P.plaza.x; state.py = P.plaza.y + 60;
-    state.aim = -Math.PI / 2;
-  } else if (shot === 'pier') {
-    state.missions.index = 2;
-    startMission(state.missions, gameApi);
-    state.px = P.pier.x; state.py = P.pier.y - 160;
-    state.aim = Math.PI / 2;
-    state.ammo = 24;
-    showBrief(MISSIONS[2].brief);
-  } else if (shot === 'dusk') {
-    const car = makeCar(900, 2050, 0, { color: '#e8c33a', model: 'sport' });
-    state.playerCar = car; state.inCar = true;
-    car.speed = 300;
-    state.px = car.x; state.py = car.y;
-    state.dusk = true;
-    setWanted(1);
+class Game {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.input = new Input(canvas);
+    this.audio = new SoundBank();
+    const params = new URLSearchParams(window.location.search);
+    this.seed = params.get('seed') || String(Date.now());
+    this.shotName = params.get('shot');
+    this.state = createState(this.seed);
+    const S = this.state;
+    S.busted = () => this.busted();
+    S.wasted = () => this.wasted();
+    S.saveGame = () => this.saveGame();
+    S.spawnVipers = () => spawnVipers(S);
+    S.audio = this.audio;
+    S.input = this.input;
+    this.last = 0;
+    this.frames = 0;
+    this.fpsTime = 0;
+    this.wireMenu();
+    // Debug hook for the automated playtest: read-only state plus the
+    // same start functions the menu buttons call. The game never reads it.
+    window.__solmar = {
+      state: S,
+      startNew: () => this.newGame(),
+      startContinue: () => this.continueGame(),
+      resume: () => this.resume(),
+    };
+    if (this.shotName) {
+      document.getElementById('menu').style.display = 'none';
+      this.newGame();
+      // NB: newGame() replaces this.state, so the scene must be built on
+      // the fresh state, not the constructor's first one.
+      setupShot(this.state, this.shotName);
+    } else {
+      this.showMenu();
+    }
+    requestAnimationFrame((t) => this.loop(t));
   }
-  // Let the world settle a few frames so traffic/peds are in view.
-  for (let i = 0; i < 40; i++) update(0.05);
-  // The settle loop costs health (Vipers shoot), so restore a clean frame
-  // and hold their fire for a few seconds.
-  state.health = 100;
-  for (const e of state.enemies) e.shootCd = 3;
-  // Chase scenes keep cruising: hold W for the screenshot, so the car is
-  // mid-drive (not parked) when the frame is taken.
-  if ((shot === 'cover' || shot === 'dusk') && state.playerCar) input.keys.add('KeyW');
-  state.mode = 'playing';
-}
 
-// ---- main loop ----
-let last = performance.now();
-function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000 || 0.016);
-  last = now;
-  state.frames++;
-  if (now - state.fpsT > 1000) { state.fps = state.frames * 1000 / (now - state.fpsT); state.frames = 0; state.fpsT = now; }
-  if (state.mode === 'playing') update(dt);
-  renderer.draw(renderState(), now / 1000);
-  input.endFrame();
-  requestAnimationFrame(frame);
-}
-
-// ---- menu wiring ----
-if (hasSave()) {
-  continueBtn.classList.remove('hidden');
-  const s = loadGame();
-  menuNote.textContent = `Save found: $${s.cash}, Job ${Math.min(s.missionIndex + 1, 5)}/5.`;
-}
-newBtn.addEventListener('click', () => { clearSave(); newGame(false); });
-continueBtn.addEventListener('click', () => newGame(true));
-resumeBtn.addEventListener('click', () => {
-  state.mode = 'playing';
-  pauseEl.classList.add('hidden');
-  audio.unlock();
-});
-restartBtn.addEventListener('click', () => {
-  pauseEl.classList.add('hidden');
-  clearSave();
-  newGame(false);
-});
-
-window.addEventListener('keydown', (e) => {
-  if (e.code === 'KeyP' && (state.mode === 'playing' || state.mode === 'paused')) {
-    if (state.mode === 'playing') { state.mode = 'paused'; pauseEl.classList.remove('hidden'); }
-    else { state.mode = 'playing'; pauseEl.classList.add('hidden'); }
+  wireMenu() {
+    const $ = (id) => document.getElementById(id);
+    $('btn-new').addEventListener('click', () => {
+      this.audio.unlock();
+      this.newGame();
+    });
+    $('btn-continue').addEventListener('click', () => {
+      this.audio.unlock();
+      this.continueGame();
+    });
+    $('btn-resume').addEventListener('click', () => this.resume());
+    $('btn-restart').addEventListener('click', () => {
+      this.audio.unlock();
+      this.newGame();
+    });
+    $('btn-quit').addEventListener('click', () => this.showMenu());
+    $('btn-back').addEventListener('click', () => {
+      this.audio.unlock();
+      this.respawnAfterEnd();
+    });
+    $('btn-end-menu').addEventListener('click', () => this.showMenu());
+    $('btn-roam').addEventListener('click', () => {
+      $('overlay-complete').style.display = 'none';
+      this.state.mode = 'playing';
+    });
+    $('btn-complete-menu').addEventListener('click', () => this.showMenu());
   }
-  if (e.code === 'KeyM') {
-    const m = audio.toggleMute();
-    toast(m ? 'Sound muted (M to unmute)' : 'Sound on', 1.5);
+
+  showMenu() {
+    const S = this.state;
+    S.mode = 'menu';
+    this.audio.stopAll();
+    document.getElementById('menu').style.display = 'flex';
+    document.getElementById('pause').style.display = 'none';
+    document.getElementById('overlay-end').style.display = 'none';
+    document.getElementById('overlay-complete').style.display = 'none';
+    document.getElementById('btn-continue').style.display = hasSave() ? 'block' : 'none';
   }
-  if (e.code === 'Enter' && (state.mode === 'busted' || state.mode === 'wasted')) respawn();
-  if (e.code === 'Enter' && state.mode === 'menu') newGame(hasSave());
-  if (['KeyE', 'Space'].includes(e.code)) audio.unlock();
-});
-canvas.addEventListener('mousedown', () => audio.unlock());
 
-// Test + screenshot hook: window.__solmar exposes live state for automation.
-window.__solmar = {
-  state,
-  newGame: (fromSave) => newGame(fromSave),
-  applyShot,
-  saveGame: () => saveGame(state),
-  version: 'solmar-heat-r2',
-};
+  newGame() {
+    clearSave();
+    this.state = createState(this.seed);
+    const S = this.state;
+    S.busted = () => this.busted();
+    S.wasted = () => this.wasted();
+    S.saveGame = () => this.saveGame();
+    S.spawnVipers = () => spawnVipers(S);
+    S.audio = this.audio;
+    S.input = this.input;
+    window.__solmar.state = S;
+    startMission(S, 0);
+    S.mode = 'playing';
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('pause').style.display = 'none';
+    document.getElementById('overlay-end').style.display = 'none';
+    document.getElementById('overlay-complete').style.display = 'none';
+    this.saveGame();
+  }
 
-// Auto-start when a ?shot= scene is requested (no menu click needed).
-if (shot) {
-  newGame(false);
-  applyShot();
-} else {
-  renderer.draw(renderState(), 0);
+  continueGame() {
+    const data = readSave();
+    this.newGame();
+    if (!data) return;
+    const S = this.state;
+    const p = S.player;
+    p.cash = data.cash;
+    p.hp = data.hp;
+    p.ammo = data.ammo;
+    p.x = data.x;
+    p.y = data.y;
+    S.timeOfDay = data.timeOfDay || 'day';
+    S.stats.kills = data.kills || 0;
+    S.stats.carsStolen = data.carsStolen || 0;
+    S.mission.done = data.done || [];
+    startMission(S, data.missionIndex || 0);
+    if (data.missionIndex >= 5) S.mission.done = ['first-wheels', 'sunset-courier', 'pier-showdown', 'heat-run', 'night-run'];
+    S.mode = 'playing';
+  }
+
+  resume() {
+    if (this.state.mode !== 'paused') return;
+    this.state.mode = 'playing';
+    document.getElementById('pause').style.display = 'none';
+  }
+
+  pause() {
+    if (this.state.mode !== 'playing') return;
+    this.state.mode = 'paused';
+    this.audio.engine(false, 0);
+    this.audio.siren(false, 0);
+    document.getElementById('pause').style.display = 'flex';
+    this.saveGame();
+  }
+
+  busted() {
+    const S = this.state;
+    if (S.mode !== 'playing') return;
+    S.mode = 'busted';
+    S.player.cash = Math.max(0, S.player.cash - 100);
+    S.player.heat = 0;
+    S.player.wanted = 0;
+    S.player.bust = 0;
+    S.cars.police = [];
+    S.cops = [];
+    this.audio.bust();
+    this.audio.engine(false, 0);
+    this.audio.siren(false, 0);
+    document.getElementById('end-title').textContent = 'BUSTED';
+    document.getElementById('end-text').textContent =
+      'The Solmar PD caught up with Dana. $100 bail, and the heat is off — for now.';
+    document.getElementById('overlay-end').style.display = 'flex';
+    this.saveGame();
+  }
+
+  wasted() {
+    const S = this.state;
+    if (S.mode !== 'playing') return;
+    S.mode = 'wasted';
+    S.player.cash = Math.max(0, S.player.cash - 150);
+    S.player.heat = 0;
+    S.player.wanted = 0;
+    S.player.bust = 0;
+    S.cars.police = [];
+    S.cops = [];
+    this.audio.bust();
+    this.audio.engine(false, 0);
+    this.audio.siren(false, 0);
+    document.getElementById('end-title').textContent = 'WASTED';
+    document.getElementById('end-text').textContent =
+      'Dana is down. The medics patch her up for $150 and drop her back on the streets.';
+    document.getElementById('overlay-end').style.display = 'flex';
+    this.saveGame();
+  }
+
+  respawnAfterEnd() {
+    const S = this.state;
+    const p = S.player;
+    p.hp = 100;
+    p.ammo = 24;
+    p.car = null;
+    p.x = GARAGE.mx;
+    p.y = GARAGE.my + 60;
+    p.angle = -Math.PI / 2;
+    S.bullets = [];
+    S.vipers = [];
+    document.getElementById('overlay-end').style.display = 'none';
+    S.mode = 'playing';
+    this.saveGame();
+  }
+
+  saveGame() {
+    writeSave(this.state);
+  }
+
+  commitCrime(heat) {
+    const S = this.state;
+    S.player.heat = Math.min(10, S.player.heat + heat);
+    S.lastCrimeAt = S.time;
+  }
+
+  stealOrExit() {
+    const S = this.state;
+    const p = S.player;
+    if (p.car) {
+      // Step out: the car stays where it is, parked.
+      const car = p.car;
+      car.kind = 'parked';
+      car.speed = 0;
+      S.cars.parked.push(car);
+      p.car = null;
+      p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 26;
+      p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 26;
+      const fixed = resolveCircle(S.city, p.x, p.y, 12);
+      p.x = fixed.x;
+      p.y = fixed.y;
+      this.audio.engine(false, 0);
+      return;
+    }
+    let best = null;
+    let bestD = 52;
+    for (const car of S.cars.parked) {
+      const d = dist(p.x, p.y, car.x, car.y);
+      if (d < bestD) {
+        bestD = d;
+        best = car;
+      }
+    }
+    if (!best) return;
+    S.cars.parked = S.cars.parked.filter((c) => c !== best);
+    best.kind = 'player';
+    p.car = best;
+    p.x = best.x;
+    p.y = best.y;
+    p.angle = best.angle;
+    p.speed = 0;
+    S.stats.carsStolen += 1;
+    this.commitCrime(2);
+    this.audio.chime();
+    this.saveGame();
+  }
+
+  shoot() {
+    const S = this.state;
+    const p = S.player;
+    if (S.fireCd > 0 || p.ammo <= 0) return;
+    S.fireCd = FIRE_INTERVAL;
+    const wx = this.input.mouseX + S.cam.x;
+    const wy = this.input.mouseY + S.cam.y;
+    const angle = angleTo(p.x, p.y, wx, wy);
+    p.angle = angle;
+    fireBullet(S, p.x, p.y, angle, true);
+    p.ammo -= 1;
+    S.shotsFiredAt = S.time;
+    this.commitCrime(1);
+    this.audio.shot();
+    S.fx.push({ kind: 'flash', x: p.x + Math.cos(angle) * 22, y: p.y + Math.sin(angle) * 22, life: 0.1, max: 0.1 });
+  }
+
+  updateOnFoot(dt) {
+    const S = this.state;
+    const p = S.player;
+    const input = this.input;
+    const axis = input.moveAxis();
+    const running = input.down('ShiftLeft', 'ShiftRight');
+    const speed = running ? RUN_SPEED : WALK_SPEED;
+    let moved = false;
+    if (axis.x !== 0 || axis.y !== 0) {
+      const len = Math.hypot(axis.x, axis.y);
+      const nx = p.x + (axis.x / len) * speed * dt;
+      const ny = p.y + (axis.y / len) * speed * dt;
+      const fixed = resolveCircle(S.city, nx, ny, 12);
+      p.walkBlocked = fixed.hit;
+      p.x = clamp(fixed.x, 20, WORLD - 20);
+      p.y = clamp(fixed.y, 20, WORLD - 20);
+      moved = true;
+    } else {
+      p.walkBlocked = false;
+    }
+    // Face the mouse when it moved recently, else the walk direction.
+    if (S.time - input.mouseMovedAt < 2) {
+      p.angle = angleTo(p.x, p.y, input.mouseX + S.cam.x, input.mouseY + S.cam.y);
+    } else if (moved) {
+      p.angle = angleTo(0, 0, axis.x, axis.y);
+    }
+    p.speed = moved ? speed : 0;
+  }
+
+  update(dt) {
+    const S = this.state;
+    const p = S.player;
+    S.time += dt;
+    S.fireCd = Math.max(0, S.fireCd - dt);
+    if (S.bannerT > 0) S.bannerT -= dt;
+
+    if (this.input.justPressed('KeyM')) {
+      this.audio.setMuted(!this.audio.muted);
+    }
+    if (this.input.justPressed('KeyP')) {
+      if (S.mode === 'playing') this.pause();
+      else if (S.mode === 'paused') this.resume();
+      return;
+    }
+    if (S.mode !== 'playing') return;
+
+    if (this.input.justPressed('KeyE')) this.stealOrExit();
+    if (this.input.clickConsumed()) this.shoot();
+
+    if (p.car) updateDriving(S, dt);
+    else this.updateOnFoot(dt);
+
+    updateTraffic(S, dt);
+    updatePoliceCars(S, dt);
+    updatePeds(S, dt);
+    updateCops(S, dt);
+    updateVipers(S, dt);
+    updateBullets(S, dt);
+
+    // Wanted: heat decays only when the player has been quiet and no
+    // police car is close. Wanted level is the ceiling of heat / 2.
+    const nearPolice = S.cars.police.some((c) => dist(c.x, c.y, p.x, p.y) < 320);
+    if (S.time - S.lastCrimeAt > 5 && !nearPolice && p.heat > 0) {
+      p.heat = Math.max(0, p.heat - dt / 6);
+    }
+    p.wanted = Math.min(5, Math.ceil(p.heat / 2));
+
+    // Police presence follows the wanted level, one spawn a second.
+    S.policeTimer -= dt;
+    const wantCars = Math.min(p.wanted, 3);
+    if (S.cars.police.length < wantCars && S.policeTimer <= 0) {
+      spawnPoliceCar(S);
+      S.policeTimer = 1;
+    }
+    while (S.cars.police.length > wantCars) S.cars.police.pop();
+    const wantCops = p.wanted >= 2 ? Math.min(p.wanted - 1, 3) : 0;
+    if (S.cops.length < wantCops && S.policeTimer <= 0) {
+      S.cops.push(spawnOfficer(S));
+      S.policeTimer = 1;
+    }
+    while (S.cops.length > wantCops) S.cops.pop();
+
+    updateMission(S, dt);
+    updateSideJob(S, dt);
+
+    for (let i = S.fx.length - 1; i >= 0; i--) {
+      S.fx[i].life -= dt;
+      if (S.fx[i].life <= 0) S.fx.splice(i, 1);
+    }
+    if (!p.car) this.audio.engine(false, 0);
+    this.audio.siren(p.wanted > 0, dt);
+
+    S.saveTimer -= dt;
+    if (S.saveTimer <= 0) {
+      S.saveTimer = 8;
+      this.saveGame();
+    }
+  }
+
+  loop(t) {
+    const dt = clamp((t - this.last) / 1000, 0, 0.05);
+    this.last = t;
+    const S = this.state;
+    this.frames += 1;
+    this.fpsTime += dt;
+    if (this.fpsTime >= 1) {
+      S.fps = this.frames / this.fpsTime;
+      this.frames = 0;
+      this.fpsTime = 0;
+    }
+    if (S.mode === 'menu') {
+      S.time += dt;
+    } else {
+      this.update(dt);
+    }
+    if (S.mode === 'complete') {
+      document.getElementById('overlay-complete').style.display = 'flex';
+    }
+    render(this.ctx, S);
+    this.input.endFrame(S.time);
+    if (S.shot) {
+      S.shotFrames += 1;
+      if (S.shotFrames === 100) window.__shotReady = true;
+    }
+    requestAnimationFrame((nt) => this.loop(nt));
+  }
 }
-requestAnimationFrame(frame);
+
+window.addEventListener('DOMContentLoaded', () => {
+  const canvas = document.getElementById('game');
+  new Game(canvas);
+});

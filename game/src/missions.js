@@ -1,148 +1,235 @@
-// Missions: Rosa's five jobs, plus repeatable courier pickups for side cash.
-// A mission is a small state machine driven by the game's update loop; the
-// game owns the player and the world, missions only read positions and set
-// the current objective marker + text.
+// missions.js — Rosa's five jobs plus courier side work for Solmar Heat.
+// Each mission is a small stage machine with a map marker and a plain
+// objective line; completing one pays cash, refills ammo, and advances
+// the story. Failing a timed job resets that job, never the story.
+import { GARAGE, SAFEHOUSE, DEPOT, PIER } from './city.js';
+import { dist } from './rng.js';
+
 export const MISSIONS = [
   {
-    id: 1, name: 'First Wheels', pay: 400,
-    brief: "Rosa: Dana, first test. Steal any car and bring it to my garage. Don't scratch it. Much.",
-    objective: 'Steal a car, then drive it to Rosa\'s Garage',
-    hint: 'Walk up to a parked car and press E.',
+    id: 'first-wheels',
+    name: 'First Wheels',
+    brief: 'Steal a car and bring it to Rosa\u2019s Garage.',
+    reward: 400,
   },
   {
-    id: 2, name: 'Sunset Courier', pay: 600,
-    brief: "Rosa: A client needs a package across town before sunset. 90 seconds. The depot is marked — go!",
-    objective: 'Deliver the package to the Courier Depot before the timer runs out',
-    hint: 'Drive fast. The timer is ticking.',
-    timed: 90,
+    id: 'sunset-courier',
+    name: 'Sunset Courier',
+    brief: 'Pick up the package at the garage, deliver to the North Depot in 90s.',
+    reward: 600,
   },
   {
-    id: 3, name: 'Pier Showdown', pay: 800,
-    brief: "Rosa: The Vipers are shaking down my pier crew. Go down there and send them packing. Pistol's loaded.",
-    objective: 'Clear the Vipers off Solmar Pier',
-    hint: 'Aim with the mouse, click to shoot.',
+    id: 'pier-showdown',
+    name: 'Pier Showdown',
+    brief: 'The Vipers hold the docks. Clear all four of them.',
+    reward: 800,
   },
   {
-    id: 4, name: 'Heat Run', pay: 900,
-    brief: "Rosa: The heat is on you, Dana. Lose the cops, then slip to the safehouse up north. Stay out of sight.",
-    objective: 'Lose your wanted level, then reach the Safehouse',
-    hint: 'Hide until the stars fade, then drive north.',
+    id: 'heat-run',
+    name: 'Heat Run',
+    brief: 'Draw 3 stars of heat, then shake it off and reach the safehouse.',
+    reward: 1000,
   },
   {
-    id: 5, name: 'Night Run', pay: 1500,
-    brief: "Rosa: Last one. A hot car for the East Docks, tonight, cops or no cops. Do this and you're family, Dana.",
-    objective: 'Deliver a car to the East Docks after dark',
-    hint: 'Steal a car, reach the docks. The city is watching.',
+    id: 'night-run',
+    name: 'Night Run',
+    brief: 'One last delivery to the North Depot, after dark. Don\u2019t get caught.',
+    reward: 1500,
   },
 ];
 
-export function makeMissionState() {
+export function freshMissionState() {
   return {
-    index: 0,            // 0-based into MISSIONS
-    stage: 'go',         // per-mission stage string
-    timer: 0,            // timed missions
-    vipersLeft: 0,
-    delivered: false,
+    index: 0,
+    done: [],
+    stage: 'steal',
+    timer: 0,
+    target: null,
+    text: MISSIONS[0].brief,
     failed: false,
-    done: false,         // all five finished
-    courier: null,       // active side pickup {x,y} or null
-    courierCd: 0,
   };
 }
 
-// Where the objective marker should point right now. Returns {x, y, label}
-// or null when there is no marker (e.g. waiting for the player to steal).
-export function missionMarker(m, world, player, inCar) {
-  const cur = MISSIONS[m.index];
-  if (!cur || m.done) return null;
-  const P = world.places;
-  switch (cur.id) {
-    case 1:
-      return inCar ? { x: P.garage.x, y: P.garage.y, label: "Rosa's Garage" } : null;
-    case 2:
-      return { x: P.courierHub.x, y: P.courierHub.y, label: 'Courier Depot' };
-    case 3:
-      return { x: P.pier.x, y: P.pier.y, label: 'Solmar Pier' };
-    case 4:
-      return { x: P.safehouse.x, y: P.safehouse.y, label: 'Safehouse' };
-    case 5:
-      return inCar ? { x: P.docks.x, y: P.docks.y, label: 'East Docks' } : null;
-    default:
-      return null;
-  }
+function setTarget(S, x, y, r, label) {
+  S.mission.target = { x, y, r, label };
 }
 
-export function missionObjectiveText(m) {
-  if (m.done) return 'All jobs done — Solmar is yours, Dana. Free roam!';
-  const cur = MISSIONS[m.index];
-  if (!cur) return '';
-  let t = `Job ${cur.id}/5: ${cur.name} — ${cur.objective}`;
-  if (cur.id === 2 && m.timer > 0) t += ` (${Math.ceil(m.timer)}s)`;
-  if (cur.id === 3 && m.vipersLeft > 0) t += ` (${m.vipersLeft} Vipers left)`;
-  return t;
-}
-
-// Called when a mission starts (index changes or fresh game).
-export function startMission(m, game) {
-  const cur = MISSIONS[m.index];
-  if (!cur) { m.done = true; return; }
-  m.stage = 'go';
+export function startMission(S, index) {
+  const m = S.mission;
+  m.index = index;
   m.failed = false;
-  m.delivered = false;
-  m.timer = cur.timed || 0;
-  m.vipersLeft = 0;
-  if (cur.id === 3) {
-    game.spawnVipersAtPier();
-    m.vipersLeft = game.vipersAlive();
+  const job = MISSIONS[index];
+  if (!job) {
+    m.text = 'Solmar is yours. Free roam — courier work pays on the side.';
+    m.target = null;
+    return;
   }
-  if (cur.id === 4) {
-    game.forceWanted(3);
-  }
-  if (cur.id === 5) {
-    game.setNight(true);
+  if (index === 0) {
+    m.stage = 'steal';
+    m.text = job.brief;
+    setTarget(S, GARAGE.mx, GARAGE.my, GARAGE.mr, GARAGE.name);
+  } else if (index === 1) {
+    m.stage = 'pickup';
+    m.text = job.brief;
+    setTarget(S, GARAGE.mx, GARAGE.my, GARAGE.mr, 'Pickup: ' + GARAGE.name);
+  } else if (index === 2) {
+    m.stage = 'goto';
+    m.text = job.brief;
+    setTarget(S, PIER.mx, PIER.my, PIER.mr, PIER.name);
+  } else if (index === 3) {
+    m.stage = 'heat';
+    m.text = job.brief;
+    setTarget(S, SAFEHOUSE.mx, SAFEHOUSE.my, SAFEHOUSE.mr, SAFEHOUSE.name);
+  } else if (index === 4) {
+    m.stage = 'drive';
+    S.timeOfDay = 'night';
+    m.text = job.brief;
+    setTarget(S, DEPOT.mx, DEPOT.my, DEPOT.mr, DEPOT.name + ' (night)');
   }
 }
 
-// Per-frame mission progress. `ev` carries game facts; returns 'paid' | 'failed' | null.
-export function updateMission(m, ev) {
-  const cur = MISSIONS[m.index];
-  if (!cur || m.done) return null;
-  const near = (tx, ty, r) => {
-    const dx = ev.px - tx, dy = ev.py - ty;
-    return dx * dx + dy * dy < r * r;
-  };
-  switch (cur.id) {
-    case 1:
-      if (ev.inCar && near(ev.garage.x, ev.garage.y, 140)) return 'paid';
-      break;
-    case 2:
-      if (m.timer > 0) {
-        m.timer -= ev.dt;
-        if (m.timer <= 0) { m.failed = true; return 'failed'; }
+export function completeMission(S) {
+  const job = MISSIONS[S.mission.index];
+  if (!job) return;
+  S.player.cash += job.reward;
+  S.player.ammo = 24;
+  S.mission.done.push(job.id);
+  S.audio.jingle();
+  S.banner = job.name + ' complete — +$' + job.reward;
+  S.bannerT = 3;
+  S.mission.index += 1;
+  startMission(S, S.mission.index);
+  S.saveGame();
+}
+
+function failMission(S, why) {
+  S.banner = 'Job failed: ' + why + ' — Rosa will give you another shot.';
+  S.bannerT = 3;
+  S.audio.bust();
+  startMission(S, S.mission.index);
+}
+
+export function updateMission(S, dt) {
+  const m = S.mission;
+  const p = S.player;
+  if (m.index >= MISSIONS.length) return;
+  const job = MISSIONS[m.index];
+  if (m.index === 0) {
+    if (m.stage === 'steal') {
+      if (p.car) {
+        m.stage = 'drive';
+        m.text = 'Now drive it to Rosa\u2019s Garage, east on the 1200 road.';
       }
-      if (near(ev.depot.x, ev.depot.y, 80)) return 'paid';
-      break;
-    case 3:
-      m.vipersLeft = ev.vipersAlive;
-      if (m.vipersLeft === 0 && ev.vipersSpawned) return 'paid';
-      break;
-    case 4:
-      if (ev.wanted === 0 && near(ev.safehouse.x, ev.safehouse.y, 90)) return 'paid';
-      break;
-    case 5:
-      if (ev.inCar && near(ev.docks.x, ev.docks.y, 90)) return 'paid';
-      break;
+    } else if (p.car && dist(p.x, p.y, GARAGE.mx, GARAGE.my) < GARAGE.mr) {
+      completeMission(S);
+    }
+  } else if (m.index === 1) {
+    if (m.stage === 'pickup') {
+      if (dist(p.x, p.y, GARAGE.mx, GARAGE.my) < GARAGE.mr) {
+        m.stage = 'deliver';
+        m.timer = 90;
+        m.text = 'Package aboard — 90 seconds to the North Depot!';
+        setTarget(S, DEPOT.mx, DEPOT.my, DEPOT.mr, 'Deliver: ' + DEPOT.name);
+        S.audio.chime();
+      }
+    } else if (m.stage === 'deliver') {
+      m.timer -= dt;
+      m.text = 'Deliver to the North Depot — ' + Math.max(0, Math.ceil(m.timer)) + 's left!';
+      if (dist(p.x, p.y, DEPOT.mx, DEPOT.my) < DEPOT.mr) {
+        completeMission(S);
+      } else if (m.timer <= 0) {
+        failMission(S, 'the package is late');
+      }
+    }
+  } else if (m.index === 2) {
+    if (m.stage === 'goto') {
+      if (dist(p.x, p.y, PIER.mx, PIER.my) < PIER.mr) {
+        m.stage = 'fight';
+        m.text = 'Four Vipers on the pier. Take them all down!';
+        S.spawnVipers();
+        S.audio.chime();
+      }
+    } else if (m.stage === 'fight') {
+      const left = S.vipers.filter((v) => !v.dead).length;
+      m.text = 'Clear the docks — ' + left + ' Viper' + (left === 1 ? '' : 's') + ' left.';
+      if (left === 0) completeMission(S);
+    }
+  } else if (m.index === 3) {
+    if (m.stage === 'heat') {
+      m.text = 'Draw heat: steal cars, fire shots — get to 3 stars!';
+      if (p.wanted >= 3) {
+        m.stage = 'evade';
+        m.text = '3 stars! Now shake the heat and reach the safehouse.';
+        S.audio.chime();
+      }
+    } else if (m.stage === 'evade') {
+      m.text = 'Stay out of sight until the heat drops, then reach the safehouse.';
+      if (p.wanted <= 0) {
+        m.stage = 'safehouse';
+        m.text = 'Heat is off — get to the safehouse, west on the 1500 road.';
+      }
+    } else if (p.wanted <= 0 && dist(p.x, p.y, SAFEHOUSE.mx, SAFEHOUSE.my) < SAFEHOUSE.mr) {
+      completeMission(S);
+    }
+  } else if (m.index === 4) {
+    m.text = 'Night Run: deliver to the North Depot. Keep it quiet.';
+    if (dist(p.x, p.y, DEPOT.mx, DEPOT.my) < DEPOT.mr) {
+      completeMission(S);
+      S.mode = 'complete';
+    }
   }
-  return null;
 }
 
-export function advanceMission(m, game) {
-  m.index++;
-  if (m.index >= MISSIONS.length) { m.done = true; return; }
-  startMission(m, game);
+// Courier side work: a paying drop spawns on a road marker every so
+// often while the player free-roams. Small money, no story stakes.
+export function updateSideJob(S, dt) {
+  const side = S.side;
+  if (!side.active) {
+    side.cooldown -= dt;
+    if (side.cooldown <= 0 && S.mission.index < MISSIONS.length) {
+      const rng = S.rng;
+      const vertical = rng.chance(0.5);
+      const road = rng.pick([600, 900, 1500, 1800]);
+      const along = 500 + rng.next() * 1400;
+      side.active = true;
+      side.timer = 60;
+      side.reward = 75 + rng.int(0, 3) * 25;
+      side.target = {
+        x: vertical ? road : along,
+        y: vertical ? along : road,
+        r: 55,
+        label: 'Courier drop +$' + side.reward,
+      };
+      S.audio.chime();
+    }
+    return;
+  }
+  side.timer -= dt;
+  const p = S.player;
+  if (dist(p.x, p.y, side.target.x, side.target.y) < side.target.r) {
+    p.cash += side.reward;
+    S.banner = 'Courier drop done — +$' + side.reward;
+    S.bannerT = 2.5;
+    S.audio.jingle();
+    side.active = false;
+    side.cooldown = 40 + S.rng.next() * 30;
+    S.saveGame();
+  } else if (side.timer <= 0) {
+    side.active = false;
+    side.cooldown = 30;
+  }
 }
 
-export function retryMission(m, game) {
-  m.failed = false;
-  startMission(m, game);
+export function objectiveText(S) {
+  const lines = [];
+  const m = S.mission;
+  if (m.index < MISSIONS.length) {
+    lines.push(MISSIONS[m.index].name + ': ' + m.text);
+  } else {
+    lines.push('Free roam — Solmar is yours.');
+  }
+  if (S.side.active) {
+    lines.push('Side: ' + S.side.target.label + ' (' + Math.ceil(S.side.timer) + 's)');
+  }
+  return lines;
 }
